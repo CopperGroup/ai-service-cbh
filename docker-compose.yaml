@@ -1,0 +1,11 @@
+services:
+  tinyllama:
+    build: .
+    container_name: tinyllama-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+    env_file:
+      - .env
+
