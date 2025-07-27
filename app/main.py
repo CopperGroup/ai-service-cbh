@@ -73,7 +73,7 @@ class ScrapedData(BaseModel):
 
 class SummaryRequest(BaseModel):
     """Model for the /summary endpoint request."""
-    data: ScrapedData = Field(..., description="The scraped data object to summarize.", path="")
+    data: ScrapedData = Field(..., description="The scraped data object to summarize.",)
 
 class MergeRequest(BaseModel):
     """Model for the /merge endpoint request."""
@@ -134,6 +134,11 @@ async def merge_summaries(request: MergeRequest):
     Merges a fresh summary with a previous summary, providing the raw scraped data as context.
     Creates a new, comprehensive summary that incorporates updates or new information.
     """
+    # Corrected: Use request.model_dump_json() for Pydantic V2 or request.json() for Pydantic V1 .dict() for debugging the parsed object
+    # DO NOT use await request.json() here, as request is already a Pydantic model
+    # If you are on Pydantic V1, use: print(f"Parsed incoming /merge request body: {json.dumps(request.dict(), indent=2)}")
+
+
     # Build the prompt for merging
     messages_for_api = [
         {"role": "system", "content": "You are an AI assistant specialized in creating and structuring information about websites for other AI, so they can be helpful to users. Your goal is to combine a 'fresh' summary of recent content with a 'previous' summary of older content related to the same website. Create a single, detailed, and updated summary. If the previous summary is empty, just refine the fresh summary."},
