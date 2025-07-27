@@ -73,7 +73,7 @@ class ScrapedData(BaseModel):
 
 class SummaryRequest(BaseModel):
     """Model for the /summary endpoint request."""
-    data: ScrapedData = Field(..., description="The scraped data object to summarize.")
+    data: ScrapedData = Field(..., description="The scraped data object to summarize.", path="")
 
 class MergeRequest(BaseModel):
     """Model for the /merge endpoint request."""
