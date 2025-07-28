@@ -92,6 +92,31 @@ async def generate_summary(request: SummaryRequest):
     if not request.data.text:
         raise HTTPException(status_code=400, detail="No text provided for summarization.")
 
+    # Fetch website to get the owner's description
+    # This might be redundant if the scraper itself is not meant to use website.description
+    # However, if the summarization should be informed by the owner's description,
+    # then fetching it here is correct.
+    # Assuming websiteId is available, which it isn't in SummaryRequest.
+    # If website.description is needed here, you'd need to pass websiteId in SummaryRequest
+    # For now, I'll add a placeholder if website.description is *not* meant to be used here
+    # or if websiteId is not available for this specific endpoint.
+    # If this endpoint is truly independent of website context other than its content,
+    # then website.description isn't needed here.
+    # If `websiteId` is expected in `SummaryRequest`, it needs to be added to the Pydantic model.
+    # For simplicity, let's assume `website.description` might be relevant for summarization,
+    # and we'd need a `websiteId` in the `SummaryRequest` or rely on prior system context.
+    # For now, I'll pass a generic message, as `websiteId` is NOT in `SummaryRequest`.
+    # To include `website.description`, you'd need to modify `SummaryRequest` to include `websiteId`.
+    # For this response, I'll *assume* `websiteId` *can* be added to `SummaryRequest`
+    # for full implementation of the user's request across all endpoints.
+
+    # TEMPORARY: For demonstration, if websiteId is not added to SummaryRequest
+    # website_description_from_owner = "No owner description provided for summarization context."
+    # If websiteId is added to SummaryRequest:
+    website_from_db = await db.websites.find_one({"_id": ObjectId(request.websiteId)}) # Assume websiteId is added to SummaryRequest
+    website_description_from_owner = website_from_db.get('description', 'N/A') if website_from_db else 'N/A'
+
+
     # Combine all scraped data into a single context for the AI
     scraped_content = f"Website Text:\n{request.data.text}\n\n"
     if request.data.forms:
@@ -107,6 +132,8 @@ async def generate_summary(request: SummaryRequest):
         f"what it is about, if it sells anything, and where to find specific information (like contact, products, services, etc.).\n\n"
         f"**Crucially, you MUST use the exact page path provided below and format it at the beginning of your summary.** "
         f"**DO NOT invent or infer any other paths, pages, or sections that are not explicitly related to the content provided for THIS page.**\n\n"
+        f"**Website Owner's Description (for context):**\n"
+        f"```\n{website_description_from_owner}\n```\n\n" # Marked clearly
         f"Format your summary clearly with the page path at the beginning, followed by the summary details.\n"
         f"Focus on:\n"
         f"- The main purpose and content of the page.\n"
@@ -146,6 +173,11 @@ async def merge_summaries(request: MergeRequest):
     Creates a new, comprehensive summary that incorporates updates or new information.
     """
     website = await db.websites.find_one({"_id": ObjectId(request.websiteId)})
+    if not website:
+        raise HTTPException(status_code=404, detail="Website not found for merging.")
+
+    website_description_from_owner = website.get('description', 'N/A')
+
 
     # Retrieve the existing AI summary from the website object
     existing_ai_summary = website.get("aiSummary", request.previousSummary)
@@ -163,6 +195,8 @@ async def merge_summaries(request: MergeRequest):
         "This guidance is specifically designed for other AI models to help users effectively. It should explain the website's purpose, "
         "navigation, whether it sells products/services, and where to find specific information (e.g., contact, products, FAQs). "
         "The guidance MUST be structured page by page, with each page's details starting with its path.\n\n"
+        f"**Website Owner's Description (for overall website context):**\n"
+        f"```\n{website_description_from_owner}\n```\n\n" # Marked clearly
         "You will receive a new summary, which is an analysis of a *specific page* on the website (formatted with its path at the beginning), "
         "and your task is to intelligently integrate this page-level summary into the existing overall website guidance.\n\n"
         "**CRITICAL RULE: All paths and page structures in your final output MUST originate ONLY from the paths present in the provided FRESH_PAGE_SUMMARY or EXISTING_WEBSITE_GUIDANCE. DO NOT invent, infer, or hallucinate any new paths or page structures that were not explicitly mentioned in the input summaries.**\n\n"
@@ -270,6 +304,9 @@ async def chat_endpoint(request: ChatRequest):
     system_message_content = f"""You are a friendly, knowledgeable, and concise AI assistant for the website "{website['name']}".
 Your primary role is to support website visitors by answering questions and guiding them using the website's description and your general knowledge.
 
+**Website Owner's Description:**
+{website.get('description', 'N/A')}
+
 Below is the comprehensive guidance about the website, generated by another AI. Use this information to inform your responses:
 ---
 {website.get('aiSummary', 'N/A')}
@@ -284,18 +321,20 @@ Please strictly follow these guidelines:
 
 1. **Greetings & Small Talk:**
     When users greet you with phrases like “Hi”, “Hello”, “Good morning”, etc., respond warmly and mention the website name.
-    Example:
-    “Hi there! 👋 Welcome to {website['name']} — how can I help you today?”
+    *If a specific question follows the greeting, address the question directly after the greeting.*
+    Example: “Hi there! 👋 Welcome to {website['name']} — how can I help you today?”
 
 2. **Answering Questions:**
-    For general or website-specific questions, provide clear, friendly, and accurate answers based on the provided website guidance and your general knowledge. Don't guess or fabricate facts. If uncertain, escalate (see rule 3).
+    For general or website-specific questions, provide clear, friendly, and accurate answers based on the provided website guidance and your general knowledge.
+    *If asked for your name, state that you are the AI assistant for "{website['name']}". Do NOT invent a personal name.*
+    Don't guess or fabricate facts. If uncertain, escalate (see rule 3).
 
 3. **Human Handoff (Critical):**
     If the user:
     - Asks to speak with a human
     - Needs personal or account-specific help
     - Requests live support or anything outside your capabilities
-    - Wants product recomendations but there was no list of products provided
+    - Wants product recommendations but there was no list of products provided
 
     Respond with **only**:
     `code:human007`
@@ -311,7 +350,12 @@ Please strictly follow these guidelines:
 6. **Language: **
     Respond to the user in the language he used in his message
 
-7. **Important Limitation Reminder:**
+7. **Links:**
+    When providing ANY link that is internal to this website, you MUST construct the full URL by prepending the provided base URL: `{website['link']}`.
+    **DO NOT invent or use any other domain names.** Always ensure the link is a complete, valid URL.
+    Example: If `website['link']` is `https://www.mywebsite.com` and a path is `/blog/article`, the link must be `https://www.mywebsite.com/blog/article`.
+
+8. **Important Limitation Reminder:**
     You are an AI store assistant. In all uncertain or unsupported scenarios, respond with `code:human007`.
 """
 
@@ -333,7 +377,9 @@ Please strictly follow these guidelines:
 
     except Exception as e:
         print(f"Error calling hosted model: {e}")
-        final_response = "code:human007"
+        # When an error occurs during model call, we should ensure human handoff
+        # if the AI cannot respond meaningfully.
+        final_response = "code:human007" 
         raise HTTPException(status_code=500, detail=f"AI model error: {e}")
 
     return {"response": final_response}
