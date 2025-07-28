@@ -15,15 +15,15 @@ GEMMA_API_KEY = os.getenv("GEMMA_API_KEY")
 if not GEMMA_API_KEY:
     raise ValueError("GEMMA_API_KEY environment variable not set.")
 
-KIMI_API_KEY = os.getenv("KIMI_API_KEY")
-if not KIMI_API_KEY:
-    raise ValueError("KIMI_API_KEY environment variable not set.")
+CHIMERA_API_KEY = os.getenv("CHIMERA_API_KEY")
+if not CHIMERA_API_KEY:
+    raise ValueError("CHIMERA_API_KEY environment variable not set.")
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 MODEL_NAME_CHAT = os.getenv("MODEL_NAME", "deepseek/deepseek-r1-0528:free")
 
 MODEL_NAME_SUMMARIZATION = "google/gemma-3n-e2b-it:free"
-MODEL_NAME_MERGING = "moonshotai/kimi-k2:free"
+MODEL_NAME_MERGING = "tngtech/deepseek-r1t2-chimera:free"
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "test")
@@ -45,7 +45,7 @@ openai_client_summarization = OpenAI(
 
 openai_client_merging = OpenAI(
     base_url=OPENAI_BASE_URL,
-    api_key=KIMI_API_KEY
+    api_key=CHIMERA_API_KEY
 )
 
 # --- FastAPI App Initialization ---
@@ -80,6 +80,7 @@ class MergeRequest(BaseModel):
     freshSummary: str = Field(..., description="The newly generated summary from the current scrape.")
     previousSummary: str | None = Field(None, description="The previous AI summary for the website, if available.")
     scrapedData: ScrapedData = Field(..., description="The raw scraped data for context during merging.")
+    websiteId: str = Field(..., description="_id of the website")
 
 # --- AI Service Endpoints ---
 
@@ -98,17 +99,26 @@ async def generate_summary(request: SummaryRequest):
     if request.data.buttons:
         scraped_content += f"Buttons Detected:\n{json.dumps(request.data.buttons, indent=2)}\n\n"
 
-    # ORIGINAL SYSTEM PROMPT
+    # Enhanced System Prompt for page summarization
     system_instruction = (
-        f"You are a highly skilled summarization AI, that summarizes the info about pages of different websites. "
-        f"You do it for another AI, that will use this info to guide and help users. "
-        f"Your task is to extract the key information from the provided web page content and condense it into a concise, factual, and understandable summary. "
-        f"Focus on the main purpose and content of the page, including any interactive elements like forms or prominent buttons, and text. "
-        f"At the beginning of your summary include this path of the page, that is being summarized: {request.data.path}"
+        f"You are a highly skilled summarization AI. Your task is to analyze the provided web page content "
+        f"and construct a clear, factual, and actionable guidance about this specific page for other AI models. "
+        f"This guidance will help AI chatbots assist users visiting the website to understand its goal, navigation, "
+        f"what it is about, if it sells anything, and where to find specific information (like contact, products, services, etc.).\n\n"
+        f"**Crucially, you MUST use the exact page path provided below and format it at the beginning of your summary.** "
+        f"**DO NOT invent or infer any other paths, pages, or sections that are not explicitly related to the content provided for THIS page.**\n\n"
+        f"Format your summary clearly with the page path at the beginning, followed by the summary details.\n"
+        f"Focus on:\n"
+        f"- The main purpose and content of the page.\n"
+        f"- Any interactive elements like forms or prominent buttons.\n"
+        f"- Key information users might look for (e.g., product details, services offered, contact info, sign-up options).\n"
+        f"- How this page contributes to the overall website experience or user journey.\n\n"
+        f"Example format:\n"
+        f"Path: /about-us\n"
+        f"Summary: This page describes the company's history, mission, and team members. It aims to build trust with visitors..."
     )
 
-    # CONCATENATE SYSTEM INSTRUCTION INTO USER PROMPT FOR GEMMA
-    full_user_prompt = f"{system_instruction}\n\nSummarize the following website content:\n\n{scraped_content}"
+    full_user_prompt = f"{system_instruction}\n\nSummarize the following website content for the page with path '{request.data.path}':\n\n{scraped_content}"
 
     messages_for_api = [
         {"role": "user", "content": full_user_prompt}
@@ -118,11 +128,12 @@ async def generate_summary(request: SummaryRequest):
         response = openai_client_summarization.chat.completions.create(
             model=MODEL_NAME_SUMMARIZATION,
             messages=messages_for_api,
-            max_tokens=400, # Limit summary length
+            max_tokens=32000, # Increased token limit for detailed page summaries
             temperature=0.3, # Aim for less creative, more factual summaries
         )
         summary = response.choices[0].message.content.strip()
         print(f"Generated summary: {summary[:100]}...")
+        print(f"Generated summary Length: {len(summary)}")
         return {"summary": summary}
     except Exception as e:
         print(f"Error generating summary: {e}")
@@ -134,31 +145,72 @@ async def merge_summaries(request: MergeRequest):
     Merges a fresh summary with a previous summary, providing the raw scraped data as context.
     Creates a new, comprehensive summary that incorporates updates or new information.
     """
-    # Corrected: Use request.model_dump_json() for Pydantic V2 or request.json() for Pydantic V1 .dict() for debugging the parsed object
-    # DO NOT use await request.json() here, as request is already a Pydantic model
-    # If you are on Pydantic V1, use: print(f"Parsed incoming /merge request body: {json.dumps(request.dict(), indent=2)}")
+    website = await db.websites.find_one({"_id": ObjectId(request.websiteId)})
 
+    # Retrieve the existing AI summary from the website object
+    existing_ai_summary = website.get("aiSummary", request.previousSummary)
+    
+    # --- Debugging Log ---
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+    print(f"Existing AI Summary (from DB or request): {existing_ai_summary[:100] if existing_ai_summary else 'N/A'}...")
+    print(f"Existing AI Summary Length: {len(existing_ai_summary) if existing_ai_summary else 0}") # Log length here
+    print(f"Fresh Summary (from current scrape): {request.freshSummary[:100]}...")
+    print(f"Fresh Summary Length: {len(request.freshSummary)}")
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
 
-    # Build the prompt for merging
+    system_message = (
+        "You are an expert AI assistant responsible for creating and maintaining a comprehensive and evolving 'guidance' document for a website. "
+        "This guidance is specifically designed for other AI models to help users effectively. It should explain the website's purpose, "
+        "navigation, whether it sells products/services, and where to find specific information (e.g., contact, products, FAQs). "
+        "The guidance MUST be structured page by page, with each page's details starting with its path.\n\n"
+        "You will receive a new summary, which is an analysis of a *specific page* on the website (formatted with its path at the beginning), "
+        "and your task is to intelligently integrate this page-level summary into the existing overall website guidance.\n\n"
+        "**CRITICAL RULE: All paths and page structures in your final output MUST originate ONLY from the paths present in the provided FRESH_PAGE_SUMMARY or EXISTING_WEBSITE_GUIDANCE. DO NOT invent, infer, or hallucinate any new paths or page structures that were not explicitly mentioned in the input summaries.**\n\n"
+        "When integrating new page summaries:\n"
+        "1. **Add new page information:** If the fresh page summary introduces content about a new path/page not present in the existing guidance, add it as a new section, clearly indicating its exact path and detailed summary.\n"
+        "2. **Update existing page information:** If the fresh page summary provides updated or more accurate details for a path/page already in the existing guidance, update that specific section. Prioritize the fresh information for that page.\n"
+        "3. **Retain relevant old information:** Keep all existing website information that is still relevant and has not been superseded by the fresh page summary. Do not remove valuable context.\n"
+        "4. **Maintain structure and flow:** Ensure the merged guidance is well-organized, readable, and logically structured, making it easy for other AI to extract information. Each page's summary should ideally start with its path.\n"
+        "5. **Holistic View:** The final output should be a single, holistic guidance document for the entire website, not just a concatenation of summaries."
+    )
+
+    user_message_content = (
+        f"Here is a new summary, which is an analysis of a specific page on the website. "
+        f"It is formatted with the page path at its beginning:\n\n"
+        f"<FRESH_PAGE_SUMMARY>\n{request.freshSummary}\n</FRESH_PAGE_SUMMARY>\n\n"
+    )
+
+    if existing_ai_summary and existing_ai_summary.strip(): # Check if it's not None and not just whitespace
+        user_message_content += (
+            f"Here is the existing, comprehensive guidance for the entire website:\n\n"
+            f"<EXISTING_WEBSITE_GUIDANCE>\n{existing_ai_summary}\n</EXISTING_WEBSITE_GUIDANCE>\n\n"
+            f"Please integrate the fresh page summary into the existing website guidance, following all rules, especially the one about not inventing paths. "
+            f"Ensure the final output is a single, updated, and comprehensive guidance about the *entire website*, "
+            f"maintaining a page-by-page structure where appropriate, with each page's details starting with its path."
+        )
+    else:
+        user_message_content += (
+            "There is no previous comprehensive website guidance available. "
+            "Please use this fresh page summary to create the initial, comprehensive guidance for the website for other AI. "
+            "Ensure it adheres to the structure of indicating the path and then details about the page, and sets the foundation "
+            "for future guidance updates. Remember: do NOT invent new paths."
+        )
+
     messages_for_api = [
-        {"role": "system", "content": "You are an AI assistant specialized in creating and structuring information about websites for other AI, so they can be helpful to users. Your goal is to combine a 'fresh' summary of recent content with a 'previous' summary of older content related to the same website. Create a single, detailed, and updated summary. If the previous summary is empty, just refine the fresh summary."},
-        {"role": "user", "content": f"Fresh Summary:\n{request.freshSummary}\n\n"}
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message_content}
     ]
-
-    if request.previousSummary:
-        messages_for_api.append({"role": "user", "content": f"Previous Summary:\n{request.previousSummary}\n\n"})
-
-    messages_for_api.append({"role": "user", "content": "Please provide a single, merged, and updated summary based on the provided information. If there's no previous summary, simply refine the fresh summary."})
 
     try:
         response = openai_client_merging.chat.completions.create(
             model=MODEL_NAME_MERGING,
             messages=messages_for_api,
-            max_tokens=2000, # Allow more tokens for merged summary
-            temperature=0.5, # Slightly more creative for merging logic
+            max_tokens=32000, # Increased token limit for potentially very large merged summaries
+            temperature=0.4, # Slightly less creative for more factual merging
         )
         merged_summary = response.choices[0].message.content.strip()
         print(f"Generated merged summary: {merged_summary[:100]}...")
+        print(f"Generated merged summary Length: {len(merged_summary)}") # Log length of merged summary
         return {"mergedSummary": merged_summary}
     except Exception as e:
         print(f"Error merging summaries: {e}")
@@ -218,15 +270,15 @@ async def chat_endpoint(request: ChatRequest):
     system_message_content = f"""You are a friendly, knowledgeable, and concise AI assistant for the website "{website['name']}".
 Your primary role is to support website visitors by answering questions and guiding them using the website's description and your general knowledge.
 
+Below is the comprehensive guidance about the website, generated by another AI. Use this information to inform your responses:
+---
+{website.get('aiSummary', 'N/A')}
+---
+
 Your responses must be:
 - Polite and professional
 - Brief and helpful
 - Friendly and approachable
-
-Below is the website information to use as context:
----
-{website.get('description', 'N/A')}
----
 
 Please strictly follow these guidelines:
 
@@ -236,7 +288,7 @@ Please strictly follow these guidelines:
     “Hi there! 👋 Welcome to {website['name']} — how can I help you today?”
 
 2. **Answering Questions:**
-    For general or website-specific questions, provide clear, friendly, and accurate answers based on the description above. Don't guess or fabricate facts. If uncertain, escalate (see rule 3).
+    For general or website-specific questions, provide clear, friendly, and accurate answers based on the provided website guidance and your general knowledge. Don't guess or fabricate facts. If uncertain, escalate (see rule 3).
 
 3. **Human Handoff (Critical):**
     If the user:
@@ -272,6 +324,7 @@ Please strictly follow these guidelines:
         response = openai_client_chat.chat.completions.create(
             model=MODEL_NAME_CHAT,
             messages=messages_for_api,
+            max_tokens=32000, # Increased token limit for chat context
         )
         final_response = response.choices[0].message.content.strip()
 
@@ -280,7 +333,7 @@ Please strictly follow these guidelines:
 
     except Exception as e:
         print(f"Error calling hosted model: {e}")
-        final_response = "I'm sorry, I'm currently experiencing technical difficulties. Please try again later or contact our support team."
+        final_response = "code:human007"
         raise HTTPException(status_code=500, detail=f"AI model error: {e}")
 
     return {"response": final_response}
