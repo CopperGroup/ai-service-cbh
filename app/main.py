@@ -74,6 +74,7 @@ class ScrapedData(BaseModel):
 class SummaryRequest(BaseModel):
     """Model for the /summary endpoint request."""
     data: ScrapedData = Field(..., description="The scraped data object to summarize.",)
+    websiteId: str = Field(..., description="Website Id")
 
 class MergeRequest(BaseModel):
     """Model for the /merge endpoint request."""
@@ -92,28 +93,7 @@ async def generate_summary(request: SummaryRequest):
     if not request.data.text:
         raise HTTPException(status_code=400, detail="No text provided for summarization.")
 
-    # Fetch website to get the owner's description
-    # This might be redundant if the scraper itself is not meant to use website.description
-    # However, if the summarization should be informed by the owner's description,
-    # then fetching it here is correct.
-    # Assuming websiteId is available, which it isn't in SummaryRequest.
-    # If website.description is needed here, you'd need to pass websiteId in SummaryRequest
-    # For now, I'll add a placeholder if website.description is *not* meant to be used here
-    # or if websiteId is not available for this specific endpoint.
-    # If this endpoint is truly independent of website context other than its content,
-    # then website.description isn't needed here.
-    # If `websiteId` is expected in `SummaryRequest`, it needs to be added to the Pydantic model.
-    # For simplicity, let's assume `website.description` might be relevant for summarization,
-    # and we'd need a `websiteId` in the `SummaryRequest` or rely on prior system context.
-    # For now, I'll pass a generic message, as `websiteId` is NOT in `SummaryRequest`.
-    # To include `website.description`, you'd need to modify `SummaryRequest` to include `websiteId`.
-    # For this response, I'll *assume* `websiteId` *can* be added to `SummaryRequest`
-    # for full implementation of the user's request across all endpoints.
-
-    # TEMPORARY: For demonstration, if websiteId is not added to SummaryRequest
-    # website_description_from_owner = "No owner description provided for summarization context."
-    # If websiteId is added to SummaryRequest:
-    website_from_db = await db.websites.find_one({"_id": ObjectId(request.websiteId)}) # Assume websiteId is added to SummaryRequest
+    website_from_db = await db.websites.find_one({"_id": ObjectId(request.websiteId)})
     website_description_from_owner = website_from_db.get('description', 'N/A') if website_from_db else 'N/A'
 
 
